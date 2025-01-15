@@ -54,7 +54,7 @@ pub fn color_picker_context_view<'a, Message: Clone + 'static>(
 pub fn search_header<Message>(
     pages: &page::Binder<Message>,
     page: page::Entity,
-) -> cosmic::Element<crate::Message> {
+) -> Element<crate::Message> {
     let page_meta = &pages.info[page];
 
     let mut column_children = Vec::with_capacity(4);
@@ -71,7 +71,7 @@ pub fn search_header<Message>(
     }
 
     column_children.push(
-        crate::widget::search_page_link(&page_meta.title)
+        search_page_link(&page_meta.title)
             .on_press(crate::Message::Page(page))
             .into(),
     );
@@ -130,9 +130,9 @@ pub fn page_list_item<'a, Message: 'static + Clone>(
         space_s,
         space_m,
         ..
-    } = cosmic::theme::active().cosmic().spacing;
+    } = theme::active().cosmic().spacing;
 
-    let mut builder = cosmic::widget::settings::item::builder(title);
+    let mut builder = settings::item::builder(title);
 
     let description = description.into();
 
@@ -187,14 +187,14 @@ pub fn sub_page_header<'a, Message: 'static + Clone>(
         .into()
 }
 
-pub fn go_next_item<Msg: Clone + 'static>(description: &str, msg: Msg) -> cosmic::Element<'_, Msg> {
+pub fn go_next_item<Msg: Clone + 'static>(description: &str, msg: Msg) -> Element<'_, Msg> {
     settings::item_row(vec![
         text::body(description).wrapping(Wrapping::Word).into(),
         horizontal_space().into(),
         icon::from_name("go-next-symbolic").size(16).icon().into(),
     ])
     .apply(widget::container)
-    .class(cosmic::theme::Container::List)
+    .class(theme::Container::List)
     .apply(button::custom)
     .class(theme::Button::Transparent)
     .on_press(msg)
@@ -203,21 +203,21 @@ pub fn go_next_item<Msg: Clone + 'static>(description: &str, msg: Msg) -> cosmic
 
 pub fn go_next_with_item<'a, Msg: Clone + 'static>(
     description: &'a str,
-    item: impl Into<cosmic::Element<'a, Msg>>,
+    item: impl Into<Element<'a, Msg>>,
     msg: Msg,
-) -> cosmic::Element<'_, Msg> {
+) -> Element<'a, Msg> {
     settings::item_row(vec![
         text::body(description).wrapping(Wrapping::Word).into(),
         horizontal_space().into(),
-        widget::row::with_capacity(2)
+        row::with_capacity(2)
             .push(item)
             .push(icon::from_name("go-next-symbolic").size(16).icon())
             .align_y(Alignment::Center)
-            .spacing(cosmic::theme::active().cosmic().spacing.space_s)
+            .spacing(theme::active().cosmic().spacing.space_s)
             .into(),
     ])
     .apply(widget::container)
-    .class(cosmic::theme::Container::List)
+    .class(theme::Container::List)
     .apply(button::custom)
     .class(theme::Button::Transparent)
     .on_press(msg)

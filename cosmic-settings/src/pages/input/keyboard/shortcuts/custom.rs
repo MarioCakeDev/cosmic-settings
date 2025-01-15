@@ -3,7 +3,7 @@ use std::str::FromStr;
 use super::{ShortcutBinding, ShortcutMessage, ShortcutModel};
 
 use cosmic::iced::{Alignment, Length};
-use cosmic::widget::{self, button, icon};
+use cosmic::widget::{self, button, icon, };
 use cosmic::{Apply, Element, Task};
 use cosmic_settings_config::shortcuts::{Action, Shortcuts};
 use cosmic_settings_config::Binding;
@@ -68,6 +68,7 @@ struct AddShortcut {
     pub task: String,
     pub keys: Slab<(String, widget::Id, bool)>,
 }
+
 
 impl AddShortcut {
     pub fn enable(&mut self) {
@@ -262,12 +263,12 @@ impl Page {
                     *editing,
                     move |enable| Message::KeyEditing(id, enable),
                 )
-                .padding([0, 12])
-                .on_input(move |input| Message::KeyInput(id, input))
-                .on_submit(Message::AddKeybinding)
-                .id(widget_id.clone())
-                .apply(widget::container)
-                .padding([8, 24]);
+                    .padding([0, 12])
+                    .on_input(move |input| Message::KeyInput(id, input))
+                    .on_submit(Message::AddKeybinding)
+                    .id(widget_id.clone())
+                    .apply(widget::container)
+                    .padding([8, 24]);
 
                 column.add(key_combination)
             },
@@ -385,7 +386,6 @@ fn bindings(_defaults: &Shortcuts, keybindings: &Shortcuts) -> Slab<ShortcutMode
                     id: widget::Id::unique(),
                     binding: binding.clone(),
                     input: String::new(),
-                    editing: false,
                     is_default: false,
                 };
 
@@ -404,6 +404,7 @@ fn bindings(_defaults: &Shortcuts, keybindings: &Shortcuts) -> Slab<ShortcutMode
                         },
                         description,
                         modified: 0,
+                        request_key_input: None,
                     });
                 }
             }

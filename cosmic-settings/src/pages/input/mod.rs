@@ -191,7 +191,9 @@ impl page::Page<crate::pages::Message> for Page {
 
 impl page::AutoBind<crate::pages::Message> for Page {
     fn sub_pages(page: page::Insert<crate::pages::Message>) -> page::Insert<crate::pages::Message> {
-        let insert = page.sub_page::<keyboard::Page>().sub_page::<mouse::Page>();
+        let insert = page
+            .sub_page::<keyboard::Page>()
+            .sub_page::<mouse::Page>();
 
         if system_has_touchpad() {
             insert.sub_page::<touchpad::Page>()

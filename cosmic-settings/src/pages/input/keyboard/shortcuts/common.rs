@@ -1,8 +1,16 @@
-use cosmic::iced::{Alignment, Length};
-use cosmic::widget::{self, button, icon, settings, text};
-use cosmic::{theme, Apply, Element, Task};
+use cosmic::cctk::sctk::seat::keyboard::Keysym;
+use cosmic::iced::event::Status;
+use cosmic::iced::keyboard::key::Named;
+use cosmic::iced::mouse::Cursor;
+use cosmic::iced::{Alignment, Event, Length, Limits, Rectangle, Size};
+use cosmic::iced_core::layout::Node;
+use cosmic::iced_core::renderer::Style;
+use cosmic::iced_core::widget::Tree;
+use cosmic::iced_core::{Clipboard, Layout, Shell};
+use cosmic::widget::{self, button, icon, settings, text, Widget};
+use cosmic::{iced, theme, Apply, Element, Renderer, Task, Theme};
 use cosmic_config::{ConfigGet, ConfigSet};
-use cosmic_settings_config::shortcuts::{self, Action, Binding, Shortcuts};
+use cosmic_settings_config::shortcuts::{self, Action, Binding, Modifiers, Shortcuts};
 use cosmic_settings_page as page;
 use slab::Slab;
 use slotmap::Key;
@@ -15,21 +23,22 @@ pub enum ShortcutMessage {
     AddKeybinding,
     ApplyReplace,
     CancelReplace,
-    DeleteBinding(usize),
-    DeleteShortcut(usize),
-    EditBinding(usize, bool),
-    InputBinding(usize, String),
+    DeleteBinding(BindingId),
+    DeleteShortcut(BindingId),
+    EditBinding(BindingId),
     ResetBindings,
-    ShowShortcut(usize, String),
-    SubmitBinding(usize),
+    ShowShortcut(BindingId, String),
+    KeyPressed(BindingId, iced::keyboard::Key, iced::keyboard::Modifiers),
 }
+
+#[derive(Clone, Debug)]
+pub struct BindingId(usize);
 
 #[derive(Debug)]
 pub struct ShortcutBinding {
     pub id: widget::Id,
     pub binding: Binding,
     pub input: String,
-    pub editing: bool,
     pub is_default: bool,
 }
 
@@ -40,6 +49,7 @@ pub struct ShortcutModel {
     pub bindings: Slab<ShortcutBinding>,
     pub description: String,
     pub modified: u16,
+    pub request_key_input: Option<BindingId>,
 }
 
 impl ShortcutModel {
@@ -54,7 +64,6 @@ impl ShortcutModel {
                         id: widget::Id::unique(),
                         binding: binding.clone(),
                         input: String::new(),
-                        editing: false,
                         is_default,
                     });
 
@@ -84,6 +93,7 @@ impl ShortcutModel {
             ),
             action,
             bindings,
+            request_key_input: None,
         }
     }
 }
@@ -268,7 +278,6 @@ impl Model {
                             id: id.clone(),
                             binding: Binding::default(),
                             input: String::new(),
-                            editing: true,
                             is_default: false,
                         });
 
@@ -303,7 +312,6 @@ impl Model {
 
                                 shortcut.binding = new_binding.clone();
                                 shortcut.input.clear();
-                                shortcut.editing = false;
 
                                 let action = model.action.clone();
                                 self.config_remove(&prev_binding);
@@ -321,7 +329,7 @@ impl Model {
             ShortcutMessage::DeleteBinding(id) => {
                 if let Some(short_id) = self.shortcut_context {
                     if let Some(model) = self.shortcut_models.get_mut(short_id) {
-                        let shortcut = model.bindings.remove(id);
+                        let shortcut = model.bindings.remove(id.0);
                         if shortcut.is_default {
                             self.config_add(Action::Disable, shortcut.binding.clone());
                         } else {
@@ -338,34 +346,19 @@ impl Model {
             }
 
             ShortcutMessage::DeleteShortcut(id) => {
-                let model = self.shortcut_models.remove(id);
+                let model = self.shortcut_models.remove(id.0);
                 for (_, shortcut) in model.bindings {
                     self.config_remove(&shortcut.binding);
                     self.on_enter();
                 }
             }
 
-            ShortcutMessage::EditBinding(id, enable) => {
-                if let Some(short_id) = self.shortcut_context {
-                    if let Some(model) = self.shortcut_models.get_mut(short_id) {
-                        if let Some(shortcut) = model.bindings.get_mut(id) {
-                            shortcut.editing = enable;
-                            if enable {
-                                shortcut.input = shortcut.binding.to_string();
-                                return widget::text_input::select_all(shortcut.id.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            ShortcutMessage::InputBinding(id, text) => {
-                if let Some(short_id) = self.shortcut_context {
-                    if let Some(model) = self.shortcut_models.get_mut(short_id) {
-                        if let Some(shortcut) = model.bindings.get_mut(id) {
-                            shortcut.input = text;
-                        }
-                    }
+            ShortcutMessage::EditBinding(id) => {
+                if let Some(model) = self.shortcut_context
+                    .and_then(|id| self.shortcut_models.get_mut(id))
+                    .take_if(|model| model.bindings.contains(id.0)) {
+                    model.request_key_input = Some(id);
+                    return cosmic::task::message(crate::app::Message::None);
                 }
             }
 
@@ -391,7 +384,7 @@ impl Model {
             }
 
             ShortcutMessage::ShowShortcut(id, description) => {
-                self.shortcut_context = Some(id);
+                self.shortcut_context = Some(id.0);
                 self.replace_dialog = None;
 
                 let mut tasks = vec![cosmic::task::message(
@@ -408,55 +401,21 @@ impl Model {
                 return Task::batch(tasks);
             }
 
-            ShortcutMessage::SubmitBinding(id) => {
-                if let Some(short_id) = self.shortcut_context {
-                    let mut apply_binding = None;
+            ShortcutMessage::KeyPressed(binding_id, pressed_key, modifiers) => {
+                if let Some(model) = self.shortcut_context
+                    .and_then(|id| self.shortcut_models.get_mut(id)) {
+                    if let Some(binding) = model.bindings.get_mut(binding_id.0) {
+                        if let KeysymValue(Some(keysym)) = pressed_key.into() {
+                            let new_binding = Binding::new(Modifiers {
+                                ctrl: modifiers.control(),
+                                alt: modifiers.alt(),
+                                shift: modifiers.shift(),
+                                logo: modifiers.logo(),
+                            }, Some(keysym));
 
-                    // Check for conflicts with the new binding.
-                    if let Some(model) = self.shortcut_models.get_mut(short_id) {
-                        if let Some(shortcut) = model.bindings.get_mut(id) {
-                            match Binding::from_str(&shortcut.input) {
-                                Ok(new_binding) => {
-                                    if !new_binding.is_set() {
-                                        shortcut.input.clear();
-                                        return Task::none();
-                                    }
-                                    if let Some(action) = self.config_contains(&new_binding) {
-                                        let action_str = if let Action::Spawn(_) = &action {
-                                            super::localize_custom_action(&action, &new_binding)
-                                        } else {
-                                            super::localize_action(&action)
-                                        };
-                                        self.replace_dialog =
-                                            Some((id, new_binding, action, action_str));
-                                        return Task::none();
-                                    }
-
-                                    apply_binding = Some(new_binding);
-                                }
-
-                                Err(why) => {
-                                    tracing::error!(why, "keybinding input invalid");
-                                }
-                            }
-                        }
-                    }
-
-                    // Apply if no conflict was found.
-                    if let Some(new_binding) = apply_binding {
-                        if let Some(model) = self.shortcut_models.get_mut(short_id) {
-                            if let Some(shortcut) = model.bindings.get_mut(id) {
-                                let prev_binding = shortcut.binding.clone();
-
-                                shortcut.binding = new_binding.clone();
-                                shortcut.input.clear();
-                                shortcut.editing = false;
-
-                                let action = model.action.clone();
-                                self.config_remove(&prev_binding);
-                                self.config_add(action, new_binding);
-                                self.on_enter();
-                            }
+                            return Task::batch(vec![
+                                cosmic::task::message(crate::app::Message::None),
+                            ]);
                         }
                     }
                 }
@@ -502,24 +461,21 @@ fn context_drawer(
     let bindings = model.bindings.iter().enumerate().fold(
         widget::list_column().spacing(space_xxs),
         |section, (_, (bind_id, shortcut))| {
-            let text: Cow<'_, str> = if !shortcut.editing && shortcut.binding.is_set() {
+            let text: Cow<'_, str> = if shortcut.binding.is_set() {
                 Cow::Owned(shortcut.binding.to_string())
             } else {
                 Cow::Borrowed(&shortcut.input)
             };
 
-            let input = widget::editable_input("", text, shortcut.editing, move |enable| {
-                ShortcutMessage::EditBinding(bind_id, enable)
+            let input = widget::editable_input("", text, false, move |enable| {
+                ShortcutMessage::EditBinding(BindingId(bind_id))
             })
-            .select_on_focus(true)
-            .on_input(move |text| ShortcutMessage::InputBinding(bind_id, text))
-            .on_submit(ShortcutMessage::SubmitBinding(bind_id))
             .padding([0, space_xs])
             .id(shortcut.id.clone())
             .into();
 
             let delete_button = widget::button::icon(icon::from_name("edit-delete-symbolic"))
-                .on_press(ShortcutMessage::DeleteBinding(bind_id))
+                .on_press(ShortcutMessage::DeleteBinding(BindingId(bind_id)))
                 .into();
 
             let flex_control =
@@ -549,12 +505,398 @@ fn context_drawer(
         .width(Length::Fill)
         .align_x(Alignment::End);
 
-    widget::column::with_capacity(if show_action { 3 } else { 2 })
+    let mut capacity = 2;
+    if show_action {
+        capacity += 1;
+    }
+
+    let key_input = if let Some(binding_id) = &model.request_key_input {
+        capacity += 1;
+
+        Some(InputKeyEventHandler {
+            binding_id: binding_id.clone(),
+            on_key_pressed: Box::new(ShortcutMessage::KeyPressed),
+        })
+    } else {
+        None
+    };
+
+    widget::column::with_capacity(capacity)
         .spacing(space_l)
         .push_maybe(action)
+        .push_maybe(key_input)
         .push(bindings)
         .push(button_container)
         .into()
+}
+
+struct InputKeyEventHandler<'a, Message>
+{
+    on_key_pressed: Box<dyn Fn(BindingId, iced::keyboard::Key, iced::keyboard::Modifiers) -> Message + 'a>,
+    binding_id: BindingId,
+}
+
+impl<'a, Message> Widget<Message, Theme, Renderer> for InputKeyEventHandler<'a, Message> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(0.0), Length::Fixed(0.0))
+    }
+
+    fn layout(&self, tree: &mut Tree, renderer: &Renderer, limits: &Limits) -> Node {
+        Node::new(Size::ZERO)
+    }
+
+    fn draw(&self, tree: &Tree, renderer: &mut Renderer, theme: &Theme, style: &Style, layout: Layout<'_>, cursor: Cursor, viewport: &Rectangle) {}
+
+    fn on_event(&mut self, _state: &mut Tree, _event: Event, _layout: Layout<'_>, _cursor: Cursor, _renderer: &Renderer, _clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, _viewport: &Rectangle) -> Status {
+        match _event {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                shell.publish( (&self.on_key_pressed)(self.binding_id.clone(), key, modifiers));
+
+                Status::Captured
+            }
+            _ => Status::Ignored
+        }
+    }
+}
+
+impl<'a, Message: 'a> From<InputKeyEventHandler<'a, Message>> for Element<'a, Message> {
+    fn from(input_key_event_handler: InputKeyEventHandler<'a, Message>) -> Self {
+        Element::new(input_key_event_handler)
+    }
+}
+
+struct KeysymValue(Option<Keysym>);
+
+impl From<KeysymValue> for Option<Keysym> {
+    fn from(value: KeysymValue) -> Self {
+        value.0
+    }
+}
+
+impl From<Option<Keysym>> for KeysymValue {
+    fn from(value: Option<Keysym>) -> Self {
+        KeysymValue(value)
+    }
+}
+
+impl From<iced::keyboard::Key> for KeysymValue {
+    fn from(value: iced::keyboard::Key) -> Self {
+        match value {
+            iced::keyboard::Key::Named(named) => match named {
+                Named::Alt => Some(Keysym::Alt_L),
+                Named::AltGraph => Some(Keysym::SUN_AltGraph),
+                Named::CapsLock => Some(Keysym::Caps_Lock),
+                Named::Control => Some(Keysym::Control_L),
+                Named::Fn => Some(Keysym::XF86_Fn),
+                Named::FnLock => None,
+                Named::NumLock => Some(Keysym::Num_Lock),
+                Named::ScrollLock => Some(Keysym::Scroll_Lock),
+                Named::Shift => Some(Keysym::Shift_L),
+                Named::Symbol => None,
+                Named::SymbolLock => None,
+                Named::Meta => Some(Keysym::Meta_L),
+                Named::Hyper => Some(Keysym::Hyper_L),
+                Named::Super => Some(Keysym::Super_L),
+                Named::Enter => Some(Keysym::Return),
+                Named::Tab => Some(Keysym::Tab),
+                Named::Space => Some(Keysym::space),
+                Named::ArrowDown => Some(Keysym::Down),
+                Named::ArrowLeft => Some(Keysym::Left),
+                Named::ArrowRight => Some(Keysym::Right),
+                Named::ArrowUp => Some(Keysym::Up),
+                Named::End => Some(Keysym::End),
+                Named::Home => Some(Keysym::Home),
+                Named::PageDown => Some(Keysym::Page_Down),
+                Named::PageUp => Some(Keysym::Page_Up),
+                Named::Backspace => Some(Keysym::BackSpace),
+                Named::Clear => Some(Keysym::Clear),
+                Named::Copy => Some(Keysym::XF86_Copy),
+                Named::CrSel => None,
+                Named::Cut => Some(Keysym::XF86_Cut),
+                Named::Delete => Some(Keysym::Delete),
+                Named::EraseEof => None,
+                Named::ExSel => None,
+                Named::Insert => Some(Keysym::Insert),
+                Named::Paste => Some(Keysym::XF86_Paste),
+                Named::Redo => Some(Keysym::Redo),
+                Named::Undo => Some(Keysym::Undo),
+                Named::Accept => None,
+                Named::Again => None,
+                Named::Attn => None,
+                Named::Cancel => Some(Keysym::Cancel),
+                Named::ContextMenu => Some(Keysym::Menu),
+                Named::Escape => Some(Keysym::Escape),
+                Named::Execute => Some(Keysym::Execute),
+                Named::Find => Some(Keysym::Find),
+                Named::Help => Some(Keysym::Help),
+                Named::Pause => Some(Keysym::Pause),
+                Named::Play => None,
+                Named::Props => Some(Keysym::SUN_Props),
+                Named::Select => Some(Keysym::Select),
+                Named::ZoomIn => Some(Keysym::XF86_ZoomIn),
+                Named::ZoomOut => Some(Keysym::XF86_ZoomOut),
+                Named::BrightnessDown => Some(Keysym::XF86_MonBrightnessDown),
+                Named::BrightnessUp => Some(Keysym::XF86_MonBrightnessUp),
+                Named::Eject => Some(Keysym::XF86_Eject),
+                Named::LogOff => Some(Keysym::XF86_LogOff),
+                Named::Power => Some(Keysym::SUN_PowerSwitch),
+                Named::PowerOff => Some(Keysym::XF86_PowerOff),
+                Named::PrintScreen => Some(Keysym::SUN_Print_Screen),
+                Named::Hibernate => Some(Keysym::XF86_Hibernate),
+                Named::Standby => Some(Keysym::XF86_Standby),
+                Named::WakeUp => Some(Keysym::XF86_WakeUp),
+                Named::AllCandidates => Some(Keysym::MultipleCandidate),
+                Named::Alphanumeric => None,
+                Named::CodeInput => None,
+                Named::Compose => Some(Keysym::Multi_key),
+                Named::Convert => None,
+                Named::FinalMode => None,
+                Named::GroupFirst => Some(Keysym::ISO_First_Group),
+                Named::GroupLast => Some(Keysym::ISO_Last_Group),
+                Named::GroupNext => Some(Keysym::ISO_Next_Group),
+                Named::GroupPrevious => Some(Keysym::ISO_Prev_Group),
+                Named::ModeChange => Some(Keysym::Mode_switch),
+                Named::NextCandidate => None,
+                Named::NonConvert => None,
+                Named::PreviousCandidate => Some(Keysym::PreviousCandidate),
+                Named::Process => None,
+                Named::SingleCandidate => Some(Keysym::SingleCandidate),
+                Named::HangulMode => Some(Keysym::Hangul),
+                Named::HanjaMode => Some(Keysym::Hangul_Hanja),
+                Named::JunjaMode => Some(Keysym::Hangul_Jeonja),
+                Named::Eisu => Some(Keysym::Eisu_toggle),
+                Named::Hankaku => Some(Keysym::Hankaku),
+                Named::Hiragana => Some(Keysym::Hiragana),
+                Named::HiraganaKatakana => Some(Keysym::Hiragana_Katakana),
+                Named::KanaMode => Some(Keysym::Kana_Lock),
+                Named::KanjiMode => Some(Keysym::Kanji),
+                Named::Katakana => Some(Keysym::Katakana),
+                Named::Romaji => Some(Keysym::Romaji),
+                Named::Zenkaku => Some(Keysym::Zenkaku),
+                Named::ZenkakuHankaku => Some(Keysym::Zenkaku_Hankaku),
+                Named::Soft1 => None,
+                Named::Soft2 => None,
+                Named::Soft3 => None,
+                Named::Soft4 => None,
+                Named::ChannelDown => Some(Keysym::XF86_ChannelDown),
+                Named::ChannelUp => Some(Keysym::XF86_ChannelUp),
+                Named::Close => None,
+                Named::MailForward => Some(Keysym::XF86_MailForward),
+                Named::MailReply => Some(Keysym::XF86_Reply),
+                Named::MailSend => Some(Keysym::XF86_Send),
+                Named::MediaClose => None,
+                Named::MediaFastForward => Some(Keysym::XF86_AudioForward),
+                Named::MediaPause => Some(Keysym::XF86_AudioPause),
+                Named::MediaPlay => None,
+                Named::MediaPlayPause => None,
+                Named::MediaRecord => Some(Keysym::XF86_AudioRecord),
+                Named::MediaRewind => Some(Keysym::XF86_AudioRewind),
+                Named::MediaStop => Some(Keysym::XF86_AudioStop),
+                Named::MediaTrackNext => Some(Keysym::XF86_AudioNext),
+                Named::MediaTrackPrevious => Some(Keysym::XF86_AudioPrev),
+                Named::New => Some(Keysym::XF86_New),
+                Named::Open => Some(Keysym::XF86_Open),
+                Named::Print => Some(Keysym::Print),
+                Named::Save => Some(Keysym::XF86_Save),
+                Named::SpellCheck => Some(Keysym::XF86_Spell),
+                Named::Key11 => Some(Keysym::XF86_Numeric11),
+                Named::Key12 => Some(Keysym::XF86_Numeric12),
+                Named::AudioBalanceLeft => None,
+                Named::AudioBalanceRight => None,
+                Named::AudioBassBoostDown => None,
+                Named::AudioBassBoostToggle => None,
+                Named::AudioBassBoostUp => None,
+                Named::AudioFaderFront => None,
+                Named::AudioFaderRear => None,
+                Named::AudioSurroundModeNext => None,
+                Named::AudioTrebleDown => None,
+                Named::AudioTrebleUp => None,
+                Named::AudioVolumeDown => Some(Keysym::XF86_AudioLowerVolume),
+                Named::AudioVolumeUp => Some(Keysym::XF86_AudioRaiseVolume),
+                Named::AudioVolumeMute => Some(Keysym::XF86_AudioMute),
+                Named::MicrophoneToggle => None,
+                Named::MicrophoneVolumeDown => None,
+                Named::MicrophoneVolumeUp => None,
+                Named::MicrophoneVolumeMute => Some(Keysym::XF86_AudioMicMute),
+                Named::SpeechCorrectionList => None,
+                Named::SpeechInputToggle => None,
+                Named::LaunchApplication1 => Some(Keysym::XF86_MyComputer),
+                Named::LaunchApplication2 => Some(Keysym::XF86_Calculator),
+                Named::LaunchCalendar => Some(Keysym::XF86_Calendar),
+                Named::LaunchContacts => None,
+                Named::LaunchMail => Some(Keysym::XF86_Mail),
+                Named::LaunchMediaPlayer => None,
+                Named::LaunchMusicPlayer => Some(Keysym::XF86_AudioMedia),
+                Named::LaunchPhone => Some(Keysym::XF86_Phone),
+                Named::LaunchScreenSaver => Some(Keysym::XF86_ScreenSaver),
+                Named::LaunchSpreadsheet => None,
+                Named::LaunchWebBrowser => Some(Keysym::XF86_WWW),
+                Named::LaunchWebCam => Some(Keysym::XF86_WebCam),
+                Named::LaunchWordProcessor => Some(Keysym::XF86_Word),
+                Named::BrowserBack => Some(Keysym::XF86_Back),
+                Named::BrowserFavorites => Some(Keysym::XF86_Favorites),
+                Named::BrowserForward => Some(Keysym::XF86_Forward),
+                Named::BrowserHome => Some(Keysym::XF86_HomePage),
+                Named::BrowserRefresh => Some(Keysym::XF86_Refresh),
+                Named::BrowserSearch => Some(Keysym::XF86_Search),
+                Named::BrowserStop => Some(Keysym::XF86_Stop),
+                Named::AppSwitch => None,
+                Named::Call => None,
+                Named::Camera => None,
+                Named::CameraFocus => None,
+                Named::EndCall => None,
+                Named::GoBack => None,
+                Named::GoHome => None,
+                Named::HeadsetHook => None,
+                Named::LastNumberRedial => None,
+                Named::Notification => None,
+                Named::MannerMode => None,
+                Named::VoiceDial => None,
+                Named::TV => None,
+                Named::TV3DMode => None,
+                Named::TVAntennaCable => None,
+                Named::TVAudioDescription => None,
+                Named::TVAudioDescriptionMixDown => None,
+                Named::TVAudioDescriptionMixUp => None,
+                Named::TVContentsMenu => None,
+                Named::TVDataService => None,
+                Named::TVInput => None,
+                Named::TVInputComponent1 => None,
+                Named::TVInputComponent2 => None,
+                Named::TVInputComposite1 => None,
+                Named::TVInputComposite2 => None,
+                Named::TVInputHDMI1 => None,
+                Named::TVInputHDMI2 => None,
+                Named::TVInputHDMI3 => None,
+                Named::TVInputHDMI4 => None,
+                Named::TVInputVGA1 => None,
+                Named::TVMediaContext => None,
+                Named::TVNetwork => None,
+                Named::TVNumberEntry => None,
+                Named::TVPower => None,
+                Named::TVRadioService => None,
+                Named::TVSatellite => None,
+                Named::TVSatelliteBS => None,
+                Named::TVSatelliteCS => None,
+                Named::TVSatelliteToggle => None,
+                Named::TVTerrestrialAnalog => None,
+                Named::TVTerrestrialDigital => None,
+                Named::TVTimer => None,
+                Named::AVRInput => None,
+                Named::AVRPower => None,
+                Named::ColorF0Red => None,
+                Named::ColorF1Green => None,
+                Named::ColorF2Yellow => None,
+                Named::ColorF3Blue => None,
+                Named::ColorF4Grey => None,
+                Named::ColorF5Brown => None,
+                Named::ClosedCaptionToggle => None,
+                Named::Dimmer => None,
+                Named::DisplaySwap => None,
+                Named::DVR => None,
+                Named::Exit => None,
+                Named::FavoriteClear0 => None,
+                Named::FavoriteClear1 => None,
+                Named::FavoriteClear2 => None,
+                Named::FavoriteClear3 => None,
+                Named::FavoriteRecall0 => None,
+                Named::FavoriteRecall1 => None,
+                Named::FavoriteRecall2 => None,
+                Named::FavoriteRecall3 => None,
+                Named::FavoriteStore0 => None,
+                Named::FavoriteStore1 => None,
+                Named::FavoriteStore2 => None,
+                Named::FavoriteStore3 => None,
+                Named::Guide => None,
+                Named::GuideNextDay => None,
+                Named::GuidePreviousDay => None,
+                Named::Info => None,
+                Named::InstantReplay => None,
+                Named::Link => None,
+                Named::ListProgram => None,
+                Named::LiveContent => None,
+                Named::Lock => None,
+                Named::MediaApps => None,
+                Named::MediaAudioTrack => None,
+                Named::MediaLast => None,
+                Named::MediaSkipBackward => None,
+                Named::MediaSkipForward => None,
+                Named::MediaStepBackward => None,
+                Named::MediaStepForward => None,
+                Named::MediaTopMenu => Some(Keysym::XF86_MediaTopMenu),
+                Named::NavigateIn => None,
+                Named::NavigateNext => None,
+                Named::NavigateOut => None,
+                Named::NavigatePrevious => None,
+                Named::NextFavoriteChannel => None,
+                Named::NextUserProfile => None,
+                Named::OnDemand => None,
+                Named::Pairing => None,
+                Named::PinPDown => None,
+                Named::PinPMove => None,
+                Named::PinPToggle => None,
+                Named::PinPUp => None,
+                Named::PlaySpeedDown => None,
+                Named::PlaySpeedReset => None,
+                Named::PlaySpeedUp => None,
+                Named::RandomToggle => Some(Keysym::XF86_AudioRandomPlay),
+                Named::RcLowBattery => None,
+                Named::RecordSpeedNext => None,
+                Named::RfBypass => None,
+                Named::ScanChannelsToggle => None,
+                Named::ScreenModeNext => None,
+                Named::Settings => None,
+                Named::SplitScreenToggle => None,
+                Named::STBInput => None,
+                Named::STBPower => None,
+                Named::Subtitle => None,
+                Named::Teletext => None,
+                Named::VideoModeNext => None,
+                Named::Wink => None,
+                Named::ZoomToggle => None,
+                Named::F1 => Some(Keysym::F1),
+                Named::F2 => Some(Keysym::F2),
+                Named::F3 => Some(Keysym::F3),
+                Named::F4 => Some(Keysym::F4),
+                Named::F5 => Some(Keysym::F5),
+                Named::F6 => Some(Keysym::F6),
+                Named::F7 => Some(Keysym::F7),
+                Named::F8 => Some(Keysym::F8),
+                Named::F9 => Some(Keysym::F9),
+                Named::F10 => Some(Keysym::F10),
+                Named::F11 => Some(Keysym::F11),
+                Named::F12 => Some(Keysym::F12),
+                Named::F13 => Some(Keysym::F13),
+                Named::F14 => Some(Keysym::F14),
+                Named::F15 => Some(Keysym::F15),
+                Named::F16 => Some(Keysym::F16),
+                Named::F17 => Some(Keysym::F17),
+                Named::F18 => Some(Keysym::F18),
+                Named::F19 => Some(Keysym::F19),
+                Named::F20 => Some(Keysym::F20),
+                Named::F21 => Some(Keysym::F21),
+                Named::F22 => Some(Keysym::F22),
+                Named::F23 => Some(Keysym::F23),
+                Named::F24 => Some(Keysym::F24),
+                Named::F25 => Some(Keysym::F25),
+                Named::F26 => Some(Keysym::F26),
+                Named::F27 => Some(Keysym::F27),
+                Named::F28 => Some(Keysym::F28),
+                Named::F29 => Some(Keysym::F29),
+                Named::F30 => Some(Keysym::F30),
+                Named::F31 => Some(Keysym::F31),
+                Named::F32 => Some(Keysym::F32),
+                Named::F33 => Some(Keysym::F33),
+                Named::F34 => Some(Keysym::F34),
+                Named::F35 => Some(Keysym::F35),
+            }.into(),
+            iced::keyboard::Key::Character(c) => match c.chars().next() {
+                Some(c) => Some(Keysym::from_char(c)),
+                None => None.into()
+            }.into(),
+            _ => None.into()
+        }
+    }
 }
 
 /// Display a shortcut as a list item
@@ -608,7 +950,7 @@ fn shortcut_item(custom: bool, id: usize, data: &ShortcutModel) -> Element<Short
         .on_press(LocalMessage::Show)
         .apply(Element::from)
         .map(move |message| match message {
-            LocalMessage::Show => ShortcutMessage::ShowShortcut(id, data.description.clone()),
-            LocalMessage::Remove => ShortcutMessage::DeleteShortcut(id),
+            LocalMessage::Show => ShortcutMessage::ShowShortcut(BindingId(id), data.description.clone()),
+            LocalMessage::Remove => ShortcutMessage::DeleteShortcut(BindingId(id)),
         })
 }
