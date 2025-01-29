@@ -391,7 +391,6 @@ impl Model {
 
             ShortcutMessage::SubmitBinding(id) => return self.submit_binding(id),
 
-
             ShortcutMessage::PressBinding(id) => {
                 if let Some(model) = self.shortcut_context
                     .and_then(|id| self.shortcut_models.get_mut(id.0))
