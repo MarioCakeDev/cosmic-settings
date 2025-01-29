@@ -156,7 +156,6 @@ pub enum Message {
     SearchSubmit,
     SetTheme(Theme),
     SetWindowTitle,
-    MultipleMessages(Vec<Message>),
 }
 
 impl cosmic::Application for SettingsApp {
@@ -742,10 +741,6 @@ impl cosmic::Application for SettingsApp {
 
                 return self.activate_page(active_id);
             },
-
-            Message::MultipleMessages(messages) => {
-                return Task::batch(messages.iter().map(|message| cosmic::task::message(message.clone())));
-            }
         }
 
         Task::none()
