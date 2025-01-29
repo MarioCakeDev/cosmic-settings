@@ -35,10 +35,10 @@ pub enum ShortcutMessage {
     DeleteShortcut(BindingId),
     EditBinding(BindingId, bool),
     InputBinding(BindingId, String),
-    SubmitBinding(BindingId),
     PressBinding(BindingId),
     ResetBindings,
     ShowShortcut(BindingId, String),
+    SubmitBinding(BindingId),
     KeyPressed(BindingId, iced::keyboard::Key, iced::keyboard::Modifiers),
 }
 
