@@ -69,7 +69,6 @@ struct AddShortcut {
     pub keys: Slab<(String, widget::Id, bool)>,
 }
 
-
 impl AddShortcut {
     pub fn enable(&mut self) {
         self.active = true;
@@ -387,6 +386,7 @@ fn bindings(_defaults: &Shortcuts, keybindings: &Shortcuts) -> Slab<ShortcutMode
                     binding: binding.clone(),
                     input: String::new(),
                     is_default: false,
+                    editing: false,
                 };
 
                 if let Some((_, existing_model)) =
