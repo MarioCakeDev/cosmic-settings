@@ -2,9 +2,6 @@
 
 use crate::Message;
 use cosmic::cctk::sctk::seat::keyboard::Keysym;
-use cosmic::cctk::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::__interfaces::zwp_keyboard_shortcuts_inhibitor_v1_interface;
-use cosmic::cctk::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;
-use cosmic::font::default;
 use cosmic::iced::event::Status;
 use cosmic::iced::keyboard::key::Named;
 use cosmic::iced::mouse::Cursor;
